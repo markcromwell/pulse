@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+httpx
+# To add a dependency: put it here, then run:
+#   uv pip compile requirements.in -o requirements.lock
+# and commit BOTH files. Extras the boot-smoke will demand if you use them:
+#   jinja2            # Jinja2Templates
+#   python-multipart  # Form() / file uploads
+#   sqlalchemy        # the DB

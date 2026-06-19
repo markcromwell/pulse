@@ -1,6 +1,6 @@
 # Unit tests for PULSE. Uses the app factory for an isolated instance.
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import threading
 import time
@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import app.routers.pulse as pulse_module
 from app import create_app
+from app.pulse_buffer import PulseBuffer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCHITECTURE_MD = REPO_ROOT / "ARCHITECTURE.md"
@@ -177,3 +178,108 @@ def test_pulse_history_access_uses_shared_lock():
 
     assert mock_lock.__enter__.call_count == 2
     assert mock_lock.__exit__.call_count == 2
+
+
+def test_compute_interval_stats_empty_buffer():
+    buf = PulseBuffer()
+    stats = buf.compute_interval_stats()
+    assert stats == {
+        "count": 0,
+        "min_interval_seconds": None,
+        "max_interval_seconds": None,
+        "avg_interval_seconds": None,
+        "skew_clamped": 0,
+        "window": 20,
+    }
+
+
+def test_compute_interval_stats_single_entry():
+    buf = PulseBuffer()
+    buf.append("2026-01-01T00:00:00+00:00")
+    stats = buf.compute_interval_stats()
+    assert stats == {
+        "count": 1,
+        "min_interval_seconds": None,
+        "max_interval_seconds": None,
+        "avg_interval_seconds": None,
+        "skew_clamped": 0,
+        "window": 20,
+    }
+
+
+def test_compute_interval_stats_multi_entry():
+    buf = PulseBuffer(maxlen=10)
+    buf.append("2026-01-01T00:00:00+00:00")
+    buf.append("2026-01-01T00:00:10+00:00")
+    buf.append("2026-01-01T00:00:25+00:00")
+    stats = buf.compute_interval_stats()
+    assert stats["count"] == 3
+    assert stats["min_interval_seconds"] == 10.0
+    assert stats["max_interval_seconds"] == 15.0
+    assert stats["avg_interval_seconds"] == 12.5
+    assert stats["skew_clamped"] == 0
+    assert stats["window"] == 10
+
+
+def test_compute_interval_stats_clamps_clock_skew():
+    buf = PulseBuffer()
+    buf.append("2026-01-01T00:00:20+00:00")
+    buf.append("2026-01-01T00:00:10+00:00")
+    buf.append("2026-01-01T00:00:30+00:00")
+    stats = buf.compute_interval_stats()
+    assert stats["count"] == 3
+    assert stats["skew_clamped"] == 1
+    assert stats["min_interval_seconds"] == 0.0
+    assert stats["max_interval_seconds"] == 20.0
+    assert stats["avg_interval_seconds"] == 10.0
+    assert stats["min_interval_seconds"] >= 0
+    assert stats["avg_interval_seconds"] >= 0
+
+
+def test_compute_interval_stats_concurrent_writes():
+    buf = PulseBuffer(maxlen=50)
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def writer() -> None:
+        i = 0
+        while not stop.is_set():
+            try:
+                buf.append(
+                    datetime.fromtimestamp(1_700_000_000 + i, tz=timezone.utc).isoformat()
+                )
+                i += 1
+            except Exception as exc:
+                errors.append(exc)
+
+    def reader() -> None:
+        while not stop.is_set():
+            try:
+                stats = buf.compute_interval_stats()
+                assert isinstance(stats["count"], int)
+                assert stats["count"] >= 0
+                assert stats["window"] == 50
+                assert stats["skew_clamped"] >= 0
+                if stats["count"] < 2:
+                    assert stats["min_interval_seconds"] is None
+                    assert stats["max_interval_seconds"] is None
+                    assert stats["avg_interval_seconds"] is None
+                    assert stats["skew_clamped"] == 0
+                else:
+                    assert stats["min_interval_seconds"] is not None
+                    assert stats["max_interval_seconds"] is not None
+                    assert stats["avg_interval_seconds"] is not None
+                    assert stats["min_interval_seconds"] >= 0
+                    assert stats["avg_interval_seconds"] >= 0
+            except Exception as exc:
+                errors.append(exc)
+
+    writers = [threading.Thread(target=writer) for _ in range(4)]
+    readers = [threading.Thread(target=reader) for _ in range(4)]
+    for t in writers + readers:
+        t.start()
+    time.sleep(0.2)
+    stop.set()
+    for t in writers + readers:
+        t.join(timeout=2)
+    assert errors == []

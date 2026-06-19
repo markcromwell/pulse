@@ -1,5 +1,6 @@
 # Unit tests for PULSE. Uses the app factory for an isolated instance.
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 
@@ -55,3 +56,23 @@ def test_architecture_md_how_to_test_commands():
     how_to_test_section = text[how_to_test_start:]
     assert "python -m scripts.smoke_boot" in how_to_test_section
     assert "python -m pytest scripts/test_unit.py -x -q" in how_to_test_section
+def test_pulse():
+    resp1 = client.get("/pulse")
+    assert resp1.status_code == 200
+    data1 = resp1.json()
+    assert isinstance(data1["count"], int)
+    assert isinstance(data1["uptime_seconds"], (int, float))
+    assert data1["uptime_seconds"] >= 0
+    assert isinstance(data1["sha"], str)
+
+    time.sleep(0.1)
+
+    resp2 = client.get("/pulse")
+    assert resp2.status_code == 200
+    data2 = resp2.json()
+    assert isinstance(data2["count"], int)
+    assert isinstance(data2["uptime_seconds"], (int, float))
+    assert data2["uptime_seconds"] >= 0
+    assert isinstance(data2["sha"], str)
+    assert data2["count"] - data1["count"] == 1
+    assert data2["uptime_seconds"] > data1["uptime_seconds"]

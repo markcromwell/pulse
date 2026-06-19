@@ -1,7 +1,10 @@
 import os
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter
+
+from app.pulse_buffer import pulse_buffer
 
 router = APIRouter()
 
@@ -13,6 +16,7 @@ _counter = 0
 def pulse() -> dict:
     global _counter
     _counter += 1
+    pulse_buffer.append(datetime.now(timezone.utc).isoformat())
     return {
         "count": _counter,
         "uptime_seconds": time.time() - _start_time,

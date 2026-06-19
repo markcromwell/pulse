@@ -1,13 +1,15 @@
 # Unit tests for PULSE. Uses the app factory for an isolated instance.
+from collections import deque
 from datetime import datetime
 from pathlib import Path
+import threading
 import time
 from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
+import app.routers.pulse as pulse_module
 from app import create_app
-from app.pulse_buffer import PulseBuffer, pulse_buffer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCHITECTURE_MD = REPO_ROOT / "ARCHITECTURE.md"
@@ -59,6 +61,13 @@ def test_architecture_md_how_to_test_commands():
     how_to_test_section = text[how_to_test_start:]
     assert "python -m scripts.smoke_boot" in how_to_test_section
     assert "python -m pytest scripts/test_unit.py -x -q" in how_to_test_section
+
+
+def clear_pulse_history():
+    with pulse_module._pulse_history_lock:
+        pulse_module._pulse_history.clear()
+
+
 def test_pulse():
     resp1 = client.get("/pulse")
     assert resp1.status_code == 200
@@ -81,68 +90,90 @@ def test_pulse():
     assert data2["uptime_seconds"] > data1["uptime_seconds"]
 
 
-def test_pulse_buffer_append_and_get_recent_shape():
-    buf = PulseBuffer()
-    buf.append("2026-01-01T00:00:00+00:00")
-    recent = buf.get_recent()
-    assert isinstance(recent, list)
-    assert recent == ["2026-01-01T00:00:00+00:00"]
-
-
-def test_pulse_buffer_maxlen_eviction():
-    buf = PulseBuffer(maxlen=20)
-    for i in range(21):
-        buf.append(f"ts-{i}")
-    recent = buf.get_recent()
-    assert len(recent) == 20
-    assert recent[0] == "ts-1"
-    assert recent[-1] == "ts-20"
-
-
-def test_pulse_buffer_append_acquires_lock():
-    buf = PulseBuffer()
-    mock_lock = MagicMock()
-    mock_lock.__enter__ = MagicMock(return_value=None)
-    mock_lock.__exit__ = MagicMock(return_value=False)
-    buf._lock = mock_lock
-
-    buf.append("2026-01-01T00:00:00+00:00")
-    mock_lock.__enter__.assert_called_once()
-    mock_lock.__exit__.assert_called_once()
-
-
-def test_pulse_buffer_get_recent_acquires_lock():
-    buf = PulseBuffer()
-    mock_lock = MagicMock()
-    mock_lock.__enter__ = MagicMock(return_value=None)
-    mock_lock.__exit__ = MagicMock(return_value=False)
-    buf._lock = mock_lock
-
-    buf.get_recent()
-    mock_lock.__enter__.assert_called_once()
-    mock_lock.__exit__.assert_called_once()
+def test_pulse_history_buffer_is_module_level_deque_with_lock():
+    assert isinstance(pulse_module._pulse_history, deque)
+    assert pulse_module._pulse_history.maxlen == 20
+    assert isinstance(pulse_module._pulse_history_lock, type(threading.Lock()))
 
 
 def test_pulse_records_valid_iso8601_timestamps():
-    before = len(pulse_buffer.get_recent())
+    clear_pulse_history()
     client.get("/pulse")
     client.get("/pulse")
-    recent = pulse_buffer.get_recent()
-    new_entries = recent[before:]
-    assert len(new_entries) == 2
-    for ts in new_entries:
+
+    resp = client.get("/pulse/history")
+    assert resp.status_code == 200
+    recent = resp.json()["recent"]
+    assert len(recent) == 2
+    for ts in recent:
         parsed = datetime.fromisoformat(ts)
         assert parsed.tzinfo is not None
 
 
 def test_pulse_records_monotonic_timestamps():
-    before = len(pulse_buffer.get_recent())
+    clear_pulse_history()
     client.get("/pulse")
     time.sleep(0.01)
     client.get("/pulse")
-    recent = pulse_buffer.get_recent()
-    new_entries = recent[before:]
-    assert len(new_entries) == 2
-    ts1 = datetime.fromisoformat(new_entries[0])
-    ts2 = datetime.fromisoformat(new_entries[1])
+
+    recent = client.get("/pulse/history").json()["recent"]
+    assert len(recent) == 2
+    ts1 = datetime.fromisoformat(recent[0])
+    ts2 = datetime.fromisoformat(recent[1])
     assert ts2 > ts1
+
+
+def test_pulse_history_returns_recent_timestamps_newest_last():
+    clear_pulse_history()
+    before = client.get("/pulse/history").json()["recent"]
+    assert before == []
+
+    pulse_resp = client.get("/pulse")
+    assert pulse_resp.status_code == 200
+
+    history_resp = client.get("/pulse/history")
+    assert history_resp.status_code == 200
+    data = history_resp.json()
+    assert list(data) == ["recent"]
+    recent = data["recent"]
+    assert isinstance(recent, list)
+    assert len(recent) == 1
+    parsed = datetime.fromisoformat(recent[-1])
+    assert parsed.tzinfo is not None
+
+    time.sleep(0.01)
+    client.get("/pulse")
+    updated_recent = client.get("/pulse/history").json()["recent"]
+    assert len(updated_recent) == 2
+    assert updated_recent[0] == recent[-1]
+    assert datetime.fromisoformat(updated_recent[-1]) > parsed
+
+
+def test_pulse_history_never_exceeds_twenty_entries():
+    clear_pulse_history()
+    for _ in range(25):
+        client.get("/pulse")
+
+    resp = client.get("/pulse/history")
+    assert resp.status_code == 200
+    recent = resp.json()["recent"]
+    assert isinstance(recent, list)
+    assert len(recent) == 20
+    for ts in recent:
+        assert datetime.fromisoformat(ts).tzinfo is not None
+
+
+def test_pulse_history_access_uses_shared_lock():
+    mock_lock = MagicMock()
+    mock_lock.__enter__ = MagicMock(return_value=None)
+    mock_lock.__exit__ = MagicMock(return_value=False)
+    original_lock = pulse_module._pulse_history_lock
+    try:
+        pulse_module._pulse_history_lock = mock_lock
+        pulse_module.pulse()
+        pulse_module.pulse_history()
+    finally:
+        pulse_module._pulse_history_lock = original_lock
+
+    assert mock_lock.__enter__.call_count == 2
+    assert mock_lock.__exit__.call_count == 2

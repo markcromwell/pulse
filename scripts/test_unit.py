@@ -1,10 +1,13 @@
 # Unit tests for PULSE. Uses the app factory for an isolated instance.
+from datetime import datetime
 from pathlib import Path
 import time
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
 from app import create_app
+from app.pulse_buffer import PulseBuffer, pulse_buffer
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARCHITECTURE_MD = REPO_ROOT / "ARCHITECTURE.md"
@@ -76,3 +79,70 @@ def test_pulse():
     assert isinstance(data2["sha"], str)
     assert data2["count"] - data1["count"] == 1
     assert data2["uptime_seconds"] > data1["uptime_seconds"]
+
+
+def test_pulse_buffer_append_and_get_recent_shape():
+    buf = PulseBuffer()
+    buf.append("2026-01-01T00:00:00+00:00")
+    recent = buf.get_recent()
+    assert isinstance(recent, list)
+    assert recent == ["2026-01-01T00:00:00+00:00"]
+
+
+def test_pulse_buffer_maxlen_eviction():
+    buf = PulseBuffer(maxlen=20)
+    for i in range(21):
+        buf.append(f"ts-{i}")
+    recent = buf.get_recent()
+    assert len(recent) == 20
+    assert recent[0] == "ts-1"
+    assert recent[-1] == "ts-20"
+
+
+def test_pulse_buffer_append_acquires_lock():
+    buf = PulseBuffer()
+    mock_lock = MagicMock()
+    mock_lock.__enter__ = MagicMock(return_value=None)
+    mock_lock.__exit__ = MagicMock(return_value=False)
+    buf._lock = mock_lock
+
+    buf.append("2026-01-01T00:00:00+00:00")
+    mock_lock.__enter__.assert_called_once()
+    mock_lock.__exit__.assert_called_once()
+
+
+def test_pulse_buffer_get_recent_acquires_lock():
+    buf = PulseBuffer()
+    mock_lock = MagicMock()
+    mock_lock.__enter__ = MagicMock(return_value=None)
+    mock_lock.__exit__ = MagicMock(return_value=False)
+    buf._lock = mock_lock
+
+    buf.get_recent()
+    mock_lock.__enter__.assert_called_once()
+    mock_lock.__exit__.assert_called_once()
+
+
+def test_pulse_records_valid_iso8601_timestamps():
+    before = len(pulse_buffer.get_recent())
+    client.get("/pulse")
+    client.get("/pulse")
+    recent = pulse_buffer.get_recent()
+    new_entries = recent[before:]
+    assert len(new_entries) == 2
+    for ts in new_entries:
+        parsed = datetime.fromisoformat(ts)
+        assert parsed.tzinfo is not None
+
+
+def test_pulse_records_monotonic_timestamps():
+    before = len(pulse_buffer.get_recent())
+    client.get("/pulse")
+    time.sleep(0.01)
+    client.get("/pulse")
+    recent = pulse_buffer.get_recent()
+    new_entries = recent[before:]
+    assert len(new_entries) == 2
+    ts1 = datetime.fromisoformat(new_entries[0])
+    ts2 = datetime.fromisoformat(new_entries[1])
+    assert ts2 > ts1

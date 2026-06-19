@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
+from app.pulse_buffer import compute_interval_stats
+
 router = APIRouter()
 
 _start_time = time.time()
@@ -33,3 +35,8 @@ def pulse_history() -> dict:
     with _pulse_history_lock:
         recent = list(_pulse_history)
     return {"recent": recent}
+
+
+@router.get("/pulse/stats")
+def pulse_stats() -> dict:
+    return compute_interval_stats(_pulse_history, _pulse_history_lock)

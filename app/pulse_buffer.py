@@ -2,6 +2,9 @@ from collections import deque
 from datetime import datetime
 import threading
 
+# At least two timestamps are required to compute a single interval.
+MIN_INTERVAL_SAMPLES = 2
+
 
 def _window_descriptor(maxlen: int | None) -> str:
     if maxlen is not None:
@@ -16,7 +19,7 @@ def compute_interval_stats(history: deque[str], lock: threading.Lock) -> dict:
 
     window = _window_descriptor(maxlen)
     count = len(snapshot)
-    if count < 2:
+    if count < MIN_INTERVAL_SAMPLES:
         return {
             "count": count,
             "min_interval_s": None,

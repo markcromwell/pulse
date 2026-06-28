@@ -2,7 +2,7 @@ from collections import deque
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter
 
@@ -11,20 +11,25 @@ from app.pulse_buffer import compute_interval_stats
 router = APIRouter()
 
 _start_time = time.time()
-_counter = 0
+
+
+class _PulseCounter:
+    value: int = 0
+
+
+_counter = _PulseCounter()
 _pulse_history: deque[str] = deque(maxlen=20)
 _pulse_history_lock = threading.Lock()
 
 
 @router.get("/pulse")
 def pulse() -> dict:
-    global _counter
-    _counter += 1
-    timestamp = datetime.now(timezone.utc).isoformat()
+    _counter.value += 1
+    timestamp = datetime.now(UTC).isoformat()
     with _pulse_history_lock:
         _pulse_history.append(timestamp)
     return {
-        "count": _counter,
+        "count": _counter.value,
         "uptime_seconds": time.time() - _start_time,
         "sha": os.environ.get("COMMIT_SHA", "unknown"),
     }
